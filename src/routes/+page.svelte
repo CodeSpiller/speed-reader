@@ -1,188 +1,140 @@
 <script lang="ts">
-	let text = $state(
-		`Speed reading trains your eyes to take in more words per fixation. Paste any passage here, set your target words per minute, and press play. The word appears at the center with a red pivot letter—your optimal recognition point—so your eyes do not need to scan. Start slow, then push the pace.`
-	);
-	let wpm = $state(350);
-	let index = $state(0);
-	let playing = $state(false);
-	let chunkSize = $state(1);
-	let settingsOpen = $state(false);
+	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
+	import { listBooks, deleteBook, getCover, getProgress, type Book } from '$lib/storage';
+	import { parseEpub } from '$lib/epub';
 
-	let words = $derived(text.trim().split(/\s+/).filter(Boolean));
-	let total = $derived(words.length);
-	let current = $derived(words.slice(index, index + chunkSize).join(' ') || '');
-	let progress = $derived(total ? (index / total) * 100 : 0);
+	let books = $state<Book[]>([]);
+	let covers = $state<Record<string, string>>({});
+	let progressMap = $state<Record<string, number>>({});
+	let importing = $state(false);
+	let importStatus = $state('');
+	let dragOver = $state(false);
+	let fileInput: HTMLInputElement;
 
-	let timer: ReturnType<typeof setTimeout> | null = null;
+	onMount(load);
 
-	function pivot(word: string) {
-		if (!word) return { left: '', mid: '', right: '' };
-		const len = word.length;
-		let p = 0;
-		if (len <= 1) p = 0;
-		else if (len <= 5) p = 1;
-		else if (len <= 9) p = 2;
-		else if (len <= 13) p = 3;
-		else p = 4;
-		return { left: word.slice(0, p), mid: word[p] ?? '', right: word.slice(p + 1) };
-	}
-
-	let parts = $derived(pivot(current));
-
-	function tick() {
-		if (!playing) return;
-		if (index >= total - chunkSize) {
-			playing = false;
-			return;
-		}
-		index += chunkSize;
-		const delay = (60000 / wpm) * chunkSize;
-		const word = words[index] ?? '';
-		const extra = /[.!?,;:]$/.test(word) ? delay * 0.5 : 0;
-		timer = setTimeout(tick, delay + extra);
-	}
-
-	function play() {
-		if (!total) return;
-		if (index >= total - chunkSize) index = 0;
-		playing = true;
-		const delay = (60000 / wpm) * chunkSize;
-		timer = setTimeout(tick, delay);
-	}
-
-	function pause() {
-		playing = false;
-		if (timer) clearTimeout(timer);
-	}
-
-	function reset() {
-		pause();
-		index = 0;
-	}
-
-	function toggle() {
-		playing ? pause() : play();
-	}
-
-	function stepBack() {
-		pause();
-		index = Math.max(0, index - chunkSize);
-	}
-	function stepFwd() {
-		pause();
-		index = Math.min(Math.max(0, total - 1), index + chunkSize);
-	}
-
-	function onKey(e: KeyboardEvent) {
-		if (e.target instanceof HTMLTextAreaElement) return;
-		if (e.code === 'Space') {
-			e.preventDefault();
-			toggle();
-		} else if (e.key === 'ArrowLeft') {
-			stepBack();
-		} else if (e.key === 'ArrowRight') {
-			stepFwd();
-		} else if (e.key === 'r' || e.key === 'R') {
-			reset();
+	async function load() {
+		books = await listBooks();
+		for (const b of books) {
+			if (b.hasCover) {
+				const blob = await getCover(b.id);
+				if (blob) covers[b.id] = URL.createObjectURL(blob);
+			}
+			const p = await getProgress(b.id);
+			progressMap[b.id] = p ? p.index / Math.max(1, b.wordCount) : 0;
 		}
 	}
 
-	async function goFullscreen() {
+	async function handleFiles(files: FileList | null) {
+		if (!files || !files.length) return;
+		importing = true;
 		try {
-			await document.documentElement.requestFullscreen();
-			// @ts-ignore
-			await screen.orientation?.lock?.('landscape');
-		} catch {}
+			for (const file of Array.from(files)) {
+				if (!/\.epub$/i.test(file.name)) continue;
+				importStatus = `Parsing ${file.name}…`;
+				const { book, words, cover } = await parseEpub(file);
+				importStatus = `Saving ${book.title}…`;
+				const { saveBook } = await import('$lib/storage');
+				await saveBook(book, words, cover);
+			}
+			importStatus = '';
+			await load();
+		} catch (e) {
+			importStatus = `Error: ${(e as Error).message}`;
+		} finally {
+			importing = false;
+		}
 	}
 
-	async function paste() {
-		try {
-			const t = await navigator.clipboard.readText();
-			if (t) text = t;
-			reset();
-		} catch {}
+	async function remove(id: string, e: MouseEvent) {
+		e.stopPropagation();
+		if (!confirm('Delete this book?')) return;
+		await deleteBook(id);
+		delete covers[id];
+		await load();
+	}
+
+	function open(id: string) {
+		goto(`${base}/read/${id}`);
+	}
+
+	function onDrop(e: DragEvent) {
+		e.preventDefault();
+		dragOver = false;
+		handleFiles(e.dataTransfer?.files ?? null);
 	}
 </script>
 
-<svelte:window on:keydown={onKey} />
-
 <svelte:head>
-	<title>Speed Reader</title>
-	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-	<meta name="theme-color" content="#0b0d10" />
-	<meta name="apple-mobile-web-app-capable" content="yes" />
-	<meta name="mobile-web-app-capable" content="yes" />
-	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+	<title>Speed Reader — Library</title>
 </svelte:head>
 
-<main class="app">
-	<section class="stage" ontouchstart={() => {}}>
-		<button class="stage-tap" onclick={toggle} aria-label={playing ? 'Pause' : 'Play'}>
-			<div class="guide top"></div>
-			<div class="word" aria-live="polite">
-				<span class="left">{parts.left}</span><span class="mid">{parts.mid}</span><span class="right">{parts.right}</span>
-			</div>
-			<div class="guide bottom"></div>
-		</button>
-
-		<div class="progress" role="progressbar" aria-valuenow={Math.round(progress)}>
-			<div class="bar" style="width:{progress}%"></div>
-		</div>
-
-		<div class="hud">
-			<button class="icon" onclick={stepBack} aria-label="Back">◀</button>
-			<button class="play" onclick={toggle} aria-label={playing ? 'Pause' : 'Play'}>
-				{#if playing}
-					<svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-				{:else}
-					<svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28"><path d="M7 5v14l12-7z"/></svg>
-				{/if}
+<main class="app" ondragover={(e) => { e.preventDefault(); dragOver = true; }} ondragleave={() => (dragOver = false)} ondrop={onDrop} class:drag={dragOver}>
+	<header class="head">
+		<h1>Library</h1>
+		<div class="actions">
+			<button class="primary" onclick={() => fileInput.click()} disabled={importing}>
+				{importing ? 'Importing…' : '+ Add EPUB'}
 			</button>
-			<button class="icon" onclick={stepFwd} aria-label="Forward">▶</button>
-
-			<div class="stat">
-				<span class="num">{wpm}</span><span class="lbl">wpm</span>
-			</div>
-			<div class="stat">
-				<span class="num">{index}/{total}</span><span class="lbl">{Math.round(progress)}%</span>
-			</div>
-
-			<button class="icon settings" onclick={() => (settingsOpen = true)} aria-label="Settings">
-				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-			</button>
+			<input
+				bind:this={fileInput}
+				type="file"
+				accept=".epub,application/epub+zip"
+				multiple
+				hidden
+				onchange={(e) => handleFiles((e.currentTarget as HTMLInputElement).files)}
+			/>
 		</div>
-	</section>
+	</header>
 
-	{#if settingsOpen}
-		<div class="sheet-bg" onclick={() => (settingsOpen = false)} role="button" tabindex="-1" aria-label="Close"></div>
-		<aside class="sheet" role="dialog" aria-label="Settings">
-			<div class="sheet-handle"></div>
-			<div class="sheet-head">
-				<h1>Speed Reader</h1>
-				<button class="icon" onclick={() => (settingsOpen = false)} aria-label="Close">✕</button>
+	{#if importStatus}
+		<div class="status">{importStatus}</div>
+	{/if}
+
+	{#if books.length === 0 && !importing}
+		<div class="empty">
+			<div class="empty-inner">
+				<div class="big">📚</div>
+				<h2>No books yet</h2>
+				<p>Drop EPUB files here or tap <strong>+ Add EPUB</strong> to start.</p>
+				<button class="primary" onclick={() => fileInput.click()}>+ Add EPUB</button>
 			</div>
+		</div>
+	{:else}
+		<section class="grid">
+			{#each books as b (b.id)}
+				<div
+					class="card"
+					role="button"
+					tabindex="0"
+					onclick={() => open(b.id)}
+					onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(b.id); } }}
+				>
+					<div class="cover">
+						{#if covers[b.id]}
+							<img src={covers[b.id]} alt="" loading="lazy" />
+						{:else}
+							<div class="placeholder">{b.title.slice(0, 1)}</div>
+						{/if}
+						<div class="prog" style="width: {(progressMap[b.id] ?? 0) * 100}%"></div>
+					</div>
+					<div class="info">
+						<div class="title">{b.title}</div>
+						<div class="author">{b.author}</div>
+						<div class="meta">
+							{Math.round((progressMap[b.id] ?? 0) * 100)}% · {b.wordCount.toLocaleString()} words
+						</div>
+					</div>
+					<button class="del" onclick={(e) => remove(b.id, e)} aria-label="Delete">✕</button>
+				</div>
+			{/each}
+		</section>
+	{/if}
 
-			<label>
-				<span>WPM <strong>{wpm}</strong></span>
-				<input type="range" min="100" max="1200" step="10" bind:value={wpm} />
-			</label>
-
-			<label>
-				<span>Words per flash <strong>{chunkSize}</strong></span>
-				<input type="range" min="1" max="4" step="1" bind:value={chunkSize} />
-			</label>
-
-			<label>
-				<span>Text</span>
-				<textarea bind:value={text} rows="6" spellcheck="false" placeholder="Paste passage…"></textarea>
-			</label>
-
-			<div class="row">
-				<button onclick={paste}>Paste</button>
-				<button onclick={reset}>Reset</button>
-				<button onclick={goFullscreen}>Fullscreen</button>
-			</div>
-		</aside>
+	{#if dragOver}
+		<div class="drop-overlay">Drop EPUBs to import</div>
 	{/if}
 </main>
 
@@ -193,220 +145,150 @@
 		background: #0b0d10;
 		color: #e7e9ee;
 		font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-		overflow: hidden;
-		overscroll-behavior: none;
 		-webkit-tap-highlight-color: transparent;
-		-webkit-user-select: none;
-		user-select: none;
-		touch-action: manipulation;
 	}
-	:global(textarea, input) { -webkit-user-select: text; user-select: text; }
 
 	.app {
-		position: relative;
-		height: 100dvh;
-		width: 100vw;
-		overflow: hidden;
-	}
-
-	.stage {
-		position: relative;
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: stretch;
-		padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+		min-height: 100dvh;
+		padding: 20px 20px calc(40px + env(safe-area-inset-bottom));
+		max-width: 1200px;
+		margin: 0 auto;
 		box-sizing: border-box;
-	}
-
-	.stage-tap {
-		flex: 1;
 		position: relative;
-		background: transparent;
-		border: 0;
-		margin: 0;
-		padding: 0;
-		color: inherit;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		outline: none;
 	}
 
-	.word {
-		font-size: clamp(44px, 14vw, 128px);
-		font-weight: 500;
-		letter-spacing: -0.01em;
-		display: flex;
-		align-items: baseline;
-		white-space: nowrap;
-	}
-	.left, .right { color: #cbd4e2; }
-	.mid { color: #ef4444; }
-
-	.guide {
-		position: absolute;
-		left: 50%;
-		width: 2px;
-		background: #2a3240;
-	}
-	.guide.top    { height: clamp(20px, 5vh, 48px); top: calc(50% - clamp(80px, 14vh, 140px)); }
-	.guide.bottom { height: clamp(20px, 5vh, 48px); top: calc(50% + clamp(60px, 10vh, 100px)); }
-
-	.progress {
-		height: 3px;
-		background: #1e242d;
-		margin: 0 12px;
-		border-radius: 2px;
-		overflow: hidden;
-	}
-	.bar {
-		height: 100%;
-		background: #3b82f6;
-		transition: width 0.12s linear;
-	}
-
-	.hud {
-		display: grid;
-		grid-template-columns: auto auto auto 1fr auto auto;
-		align-items: center;
-		gap: 10px;
-		padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
-	}
-	.hud .stat {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		font-variant-numeric: tabular-nums;
-		line-height: 1.1;
-		color: #8a94a6;
-		font-size: 11px;
-	}
-	.hud .stat .num { color: #e7e9ee; font-size: 14px; font-weight: 600; }
-	.hud .stat .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
-	.hud .stat:nth-of-type(1) { margin-left: auto; }
-
-	button.icon {
-		width: 44px;
-		height: 44px;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		background: #1a2029;
-		border: 1px solid #1e242d;
-		border-radius: 12px;
-		color: #cbd4e2;
-		font-size: 14px;
-		cursor: pointer;
-		padding: 0;
-	}
-	button.icon:active { background: #222a36; transform: scale(0.96); }
-
-	button.play {
-		width: 64px;
-		height: 64px;
-		border-radius: 50%;
-		background: #3b82f6;
-		color: #fff;
-		border: 0;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		cursor: pointer;
-		box-shadow: 0 8px 24px rgba(59, 130, 246, 0.35);
-	}
-	button.play:active { transform: scale(0.96); }
-
-	.sheet-bg {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.55);
-		z-index: 20;
-		border: 0;
-	}
-	.sheet {
-		position: fixed;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		z-index: 21;
-		background: #11141a;
-		border-top: 1px solid #1e242d;
-		border-radius: 18px 18px 0 0;
-		padding: 10px 18px calc(22px + env(safe-area-inset-bottom));
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		max-height: 85dvh;
-		overflow-y: auto;
-		animation: slideUp 0.22s ease-out;
-	}
-	@keyframes slideUp {
-		from { transform: translateY(100%); }
-		to { transform: translateY(0); }
-	}
-	.sheet-handle {
-		width: 44px;
-		height: 4px;
-		background: #2a3240;
-		border-radius: 2px;
-		margin: 0 auto 6px;
-	}
-	.sheet-head {
+	.head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		padding: 10px 0 20px;
+		gap: 12px;
 	}
-	.sheet h1 { margin: 0; font-size: 16px; color: #9fb1c7; font-weight: 600; }
+	h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
 
-	label {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		font-size: 13px;
-		color: #8a94a6;
-	}
-	label span { display: flex; justify-content: space-between; align-items: baseline; }
-	label strong { color: #e7e9ee; font-weight: 600; font-size: 15px; }
+	.actions { display: flex; gap: 8px; }
 
-	input[type='range'] {
-		width: 100%;
-		accent-color: #3b82f6;
-		height: 28px;
-	}
-
-	textarea {
-		resize: vertical;
-		background: #0b0d10;
-		border: 1px solid #1e242d;
+	button.primary {
+		background: #3b82f6;
+		color: white;
+		border: 0;
 		border-radius: 10px;
-		color: #e7e9ee;
-		padding: 12px;
+		padding: 10px 16px;
 		font-size: 14px;
-		line-height: 1.5;
-		font-family: inherit;
-		min-height: 120px;
-	}
-	textarea:focus { outline: none; border-color: #3b82f6; }
-
-	.row { display: flex; gap: 8px; flex-wrap: wrap; }
-	.row button {
-		flex: 1;
-		background: #1a2029;
-		color: #e7e9ee;
-		border: 1px solid #1e242d;
-		border-radius: 10px;
-		padding: 12px 14px;
+		font-weight: 600;
 		cursor: pointer;
-		font-size: 14px;
 		min-height: 44px;
 	}
-	.row button:active { background: #222a36; }
+	button.primary:active { transform: scale(0.97); }
+	button.primary:disabled { opacity: 0.6; cursor: default; }
 
-	@media (min-width: 820px) and (orientation: landscape) {
-		.word { font-size: clamp(56px, 8vw, 128px); }
-		.hud { padding: 20px 24px calc(20px + env(safe-area-inset-bottom)); }
-		.progress { margin: 0 24px; }
+	.status {
+		background: #11141a;
+		border: 1px solid #1e242d;
+		border-radius: 10px;
+		padding: 10px 14px;
+		font-size: 13px;
+		color: #9fb1c7;
+		margin-bottom: 16px;
+	}
+
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+		gap: 16px;
+	}
+
+	.card {
+		position: relative;
+		background: #11141a;
+		border: 1px solid #1e242d;
+		border-radius: 12px;
+		padding: 10px;
+		text-align: left;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		overflow: hidden;
+	}
+	.card:active { transform: scale(0.98); }
+
+	.cover {
+		aspect-ratio: 2 / 3;
+		background: #0b0d10;
+		border-radius: 6px;
+		overflow: hidden;
+		position: relative;
+	}
+	.cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+	.placeholder {
+		width: 100%; height: 100%;
+		display: flex; align-items: center; justify-content: center;
+		font-size: 48px; color: #2a3240; font-weight: 700;
+	}
+	.prog {
+		position: absolute; left: 0; bottom: 0;
+		height: 3px; background: #3b82f6;
+	}
+
+	.info { display: flex; flex-direction: column; gap: 2px; }
+	.title { font-size: 14px; font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+	.author { font-size: 12px; color: #9fb1c7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.meta { font-size: 11px; color: #6b7585; margin-top: 2px; }
+
+	.del {
+		position: absolute;
+		top: 6px; right: 6px;
+		width: 28px; height: 28px;
+		border-radius: 50%;
+		background: rgba(0,0,0,0.65);
+		border: 0;
+		color: #e7e9ee;
+		font-size: 12px;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.card:hover .del, .card:focus-within .del { opacity: 1; }
+
+	.empty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 50dvh;
+	}
+	.empty-inner {
+		text-align: center;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		align-items: center;
+	}
+	.empty .big { font-size: 64px; }
+	.empty h2 { margin: 0; font-size: 20px; }
+	.empty p { margin: 0; color: #9fb1c7; font-size: 14px; }
+
+	.drop-overlay {
+		position: fixed;
+		inset: 12px;
+		background: rgba(59, 130, 246, 0.12);
+		border: 2px dashed #3b82f6;
+		border-radius: 16px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: #3b82f6;
+		font-size: 18px;
+		font-weight: 600;
+		pointer-events: none;
+		z-index: 50;
+	}
+
+	@media (max-width: 600px) {
+		.grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; }
+		.app { padding: 14px 14px calc(30px + env(safe-area-inset-bottom)); }
+		.card .del { opacity: 1; }
 	}
 </style>

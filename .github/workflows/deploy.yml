@@ -28,6 +28,8 @@ jobs:
         env:
           BASE_PATH: /${{ github.event.repository.name }}
         run: npm run build
+      - name: SPA fallback for deep links
+        run: cp build/index.html build/404.html
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
