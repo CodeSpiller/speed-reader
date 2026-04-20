@@ -22,7 +22,7 @@
 		"vite": "^8.0.7"
 	},
 	"dependencies": {
-		"epubjs": "^0.3.93",
-		"idb-keyval": "^6.2.2"
+		"idb-keyval": "^6.2.2",
+		"jszip": "^3.10.1"
 	}
 }

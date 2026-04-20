@@ -24,3 +24,6 @@ vite.config.ts.timestamp-*
 
 # Claude Code
 .claude/settings.local.json
+
+# Test EPUBs
+*.epub
